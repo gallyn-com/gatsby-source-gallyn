@@ -1,6 +1,19 @@
-const { createRemoteFileNode } = require("gatsby-source-filesystem");
+const { createRequire } = require("module");
 
 const PLUGIN_NAME = "gatsby-source-gallyn";
+
+// Resolve gatsby-source-filesystem from the consuming site's node_modules
+// (not from this plugin's directory, which has no node_modules).
+let _createRemoteFileNode;
+function getCreateRemoteFileNode(store) {
+  if (!_createRemoteFileNode) {
+    const siteDir = store.getState().program.directory;
+    const siteRequire = createRequire(siteDir + "/package.json");
+    _createRemoteFileNode =
+      siteRequire("gatsby-source-filesystem").createRemoteFileNode;
+  }
+  return _createRemoteFileNode;
+}
 
 async function fetchJSON(url, headers) {
   const resp = await fetch(url, { headers });
@@ -20,6 +33,7 @@ async function downloadImage(
   { store, cache, createNode, createNodeId, reporter }
 ) {
   if (!url) return null;
+  const createRemoteFileNode = getCreateRemoteFileNode(store);
   try {
     return await createRemoteFileNode({
       url,
