@@ -1,8 +1,16 @@
 {
-  "name": "gatsby-source-gallyn",
+  "name": "@gallyn/gatsby-source-gallyn",
   "version": "1.0.0",
   "description": "Gatsby source plugin for Gallyn CMS",
   "main": "gatsby-node.js",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/gallyn-com/gatsby-source-gallyn.git"
+  },
+  "license": "MIT",
+  "publishConfig": {
+    "access": "public"
+  },
   "dependencies": {
     "node-fetch": "^2.7.0"
   },
