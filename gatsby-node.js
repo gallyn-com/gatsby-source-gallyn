@@ -92,8 +92,9 @@ exports.createSchemaCustomization = ({ actions }) => {
       altText: String
     }
 
-    type GallynMarkdownField implements Node @infer {
+    type GallynMarkdownField implements Node {
       id: ID!
+      childMarkdownRemark: MarkdownRemark @link
     }
 
     type GallynPage implements Node {
