@@ -66,6 +66,8 @@ async function downloadAllImages(
   );
 
   // Download misses in parallel
+  let downloaded = 0;
+  const total = toDownload.length;
   await mapWithConcurrency(toDownload, 20, async (url) => {
     try {
       const fileNode = await createRemoteFileNode({
@@ -82,6 +84,10 @@ async function downloadAllImages(
       reporter.warn(
         `${PLUGIN_NAME}: Failed to download image ${url} — ${err.message}`
       );
+    }
+    downloaded++;
+    if (downloaded % 10 === 0 || downloaded === total) {
+      reporter.info(`${PLUGIN_NAME}: Downloaded ${downloaded}/${total} images`);
     }
   });
 
