@@ -198,10 +198,16 @@ exports.createSchemaCustomization = ({ actions }) => {
       availableLocales: [String]
     }
 
+    type GallynLanguage implements Node {
+      code: String!
+      isDefault: Boolean!
+    }
+
     type GallynTag implements Node {
       gallynId: String!
       name: String!
       slug: String!
+      locale: String!
     }
   `);
 };
@@ -240,39 +246,58 @@ exports.sourceNodes = async (
   const locales = langResponse.languages.map((l) => l.code);
   reporter.info(`${PLUGIN_NAME}: Found locales: ${locales.join(", ")}`);
 
-  // 2. Fetch tags for default locale
-  let tags = [];
-  try {
-    const tagResponse = await fetchJSON(
-      `${base}/delivery/web/tags?locale=${defaultLocale}`,
-      headers
-    );
-    tags = tagResponse.items || [];
-  } catch (err) {
-    reporter.warn(`${PLUGIN_NAME}: Failed to fetch tags — ${err.message}`);
-  }
-
-  // Map from Gallyn tag ID → Gatsby node ID (for blog post linking)
-  const tagNodeIdMap = new Map();
-
-  for (const tag of tags) {
-    const nodeId = createNodeId(`GallynTag-${tag.id}`);
-    tagNodeIdMap.set(tag.id, nodeId);
+  // 2. Create GallynLanguage nodes
+  for (const lang of langResponse.languages) {
+    const langNodeId = createNodeId(`GallynLanguage-${lang.code}`);
     createNode({
-      gallynId: tag.id,
-      name: tag.name,
-      slug: tag.slug,
-      id: nodeId,
+      code: lang.code,
+      isDefault: lang.code === defaultLocale,
+      id: langNodeId,
       internal: {
-        type: "GallynTag",
-        contentDigest: createContentDigest(tag),
+        type: "GallynLanguage",
+        contentDigest: createContentDigest(lang),
       },
     });
   }
 
-  reporter.info(`${PLUGIN_NAME}: Created ${tags.length} GallynTag nodes`);
+  // 3. Fetch tags for each locale
+  // Map from "tagId-locale" → Gatsby node ID (for blog post linking)
+  const tagNodeIdMap = new Map();
+  let totalTags = 0;
 
-  // 3. Fetch pages and blog posts for each locale
+  for (const locale of locales) {
+    let tags = [];
+    try {
+      const tagResponse = await fetchJSON(
+        `${base}/delivery/web/tags?locale=${locale}`,
+        headers
+      );
+      tags = tagResponse.items || [];
+    } catch (err) {
+      reporter.warn(`${PLUGIN_NAME}: Failed to fetch tags for ${locale} — ${err.message}`);
+    }
+
+    for (const tag of tags) {
+      const nodeId = createNodeId(`GallynTag-${tag.id}-${locale}`);
+      tagNodeIdMap.set(`${tag.id}-${locale}`, nodeId);
+      createNode({
+        gallynId: tag.id,
+        name: tag.name,
+        slug: tag.slug,
+        locale,
+        id: nodeId,
+        internal: {
+          type: "GallynTag",
+          contentDigest: createContentDigest({ ...tag, locale }),
+        },
+      });
+    }
+    totalTags += tags.length;
+  }
+
+  reporter.info(`${PLUGIN_NAME}: Created ${totalTags} GallynTag nodes`);
+
+  // 4. Fetch pages and blog posts for each locale
   const allPages = [];
   const allBlogPosts = [];
 
@@ -305,11 +330,11 @@ exports.sourceNodes = async (
     allBlogPosts.push(...blogPosts.map((p) => ({ ...p, locale })));
   }
 
-  // 4. Build hreflang maps
+  // 5. Build hreflang maps
   const pageHreflangMap = buildHreflangMap(allPages, defaultLocale);
   const blogHreflangMap = buildHreflangMap(allBlogPosts, defaultLocale);
 
-  // 5. Download all images (deduplicated + cached + parallel)
+  // 6. Download all images (deduplicated + cached + parallel)
   const allImageUrls = new Set();
   for (const page of allPages) {
     if (page.hero_image_url) allImageUrls.add(page.hero_image_url);
@@ -322,7 +347,7 @@ exports.sourceNodes = async (
   }
   const imageMap = await downloadAllImages([...allImageUrls], imageHelpers);
 
-  // 6. Create GallynPage nodes
+  // 7. Create GallynPage nodes
   for (const page of allPages) {
     const hreflangKey = page.id.replace(/-[a-z]{2}$/, "");
     const hreflang = pageHreflangMap.get(hreflangKey) || [];
@@ -416,7 +441,7 @@ exports.sourceNodes = async (
 
   reporter.info(`${PLUGIN_NAME}: Created ${allPages.length} GallynPage nodes`);
 
-  // 7. Create GallynBlogPost nodes
+  // 8. Create GallynBlogPost nodes
   for (const post of allBlogPosts) {
     const hreflangKey = post.id.replace(/-[a-z]{2}$/, "");
     const hreflang = blogHreflangMap.get(hreflangKey) || [];
@@ -434,9 +459,9 @@ exports.sourceNodes = async (
       nodeHelpers
     );
 
-    // Map tag IDs to Gatsby node IDs
+    // Map tag IDs to Gatsby node IDs (locale-aware)
     const tagNodeIds = (post.tags || [])
-      .map((t) => tagNodeIdMap.get(t.id))
+      .map((t) => tagNodeIdMap.get(`${t.id}-${post.locale}`))
       .filter(Boolean);
 
     createNode({
