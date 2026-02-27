@@ -13,6 +13,130 @@ async function fetchJSON(url, headers) {
   return resp.json();
 }
 
+/**
+ * Download an image via createRemoteFileNode, returning the File node or null.
+ */
+async function downloadImage(
+  url,
+  { store, cache, createNode, createNodeId, reporter }
+) {
+  if (!url) return null;
+  try {
+    return await createRemoteFileNode({
+      url,
+      store,
+      cache,
+      createNode,
+      createNodeId,
+      reporter,
+    });
+  } catch (err) {
+    reporter.warn(
+      `${PLUGIN_NAME}: Failed to download image ${url} — ${err.message}`
+    );
+    return null;
+  }
+}
+
+/**
+ * Create a child node with mediaType text/markdown so gatsby-transformer-remark
+ * picks it up and creates a childMarkdownRemark node.
+ */
+function createMarkdownNode(
+  parentId,
+  fieldName,
+  content,
+  { createNode, createNodeId, createContentDigest }
+) {
+  if (!content || typeof content !== "string") return null;
+  const nodeId = createNodeId(`${parentId}---${fieldName}-markdown`);
+  createNode({
+    id: nodeId,
+    parent: parentId,
+    children: [],
+    internal: {
+      type: "GallynMarkdownField",
+      mediaType: "text/markdown",
+      content,
+      contentDigest: createContentDigest(content),
+    },
+  });
+  return nodeId;
+}
+
+exports.createSchemaCustomization = ({ actions }) => {
+  const { createTypes } = actions;
+  createTypes(`
+    type GallynHreflang {
+      locale: String!
+      slug: String!
+    }
+
+    type GallynAttachment {
+      id: String!
+      filename: String!
+      url: String!
+      altText: String
+    }
+
+    type GallynPage implements Node {
+      gallynId: String!
+      title: String!
+      slug: String!
+      pageType: String!
+      locale: String!
+      blurb: String
+      heroImageFile: File @link(from: "heroImageFile___NODE", by: "id")
+      videoUrl: String
+      blockIndexing: Boolean
+      publishedAt: Date @dateformat
+      checkboxes: [String]
+      cta: JSON
+      testimonials: JSON
+      pageCategory: String
+      templateType: String
+      showAttachments: Boolean
+      autoplayVideo: Boolean
+      sections: JSON
+      relatedPages: [GallynRelatedPage] @link(from: "relatedPages___NODE", by: "id")
+      attachments: [GallynAttachment]
+      hreflang: [GallynHreflang]
+      availableLocales: [String]
+    }
+
+    type GallynRelatedPage implements Node {
+      gallynId: String!
+      title: String!
+      slug: String!
+      blurb: String
+      pageType: String!
+      heroImageFile: File @link(from: "heroImageFile___NODE", by: "id")
+    }
+
+    type GallynBlogPost implements Node {
+      gallynId: String!
+      title: String!
+      slug: String!
+      locale: String!
+      author: String
+      description: String
+      heroImageFile: File @link(from: "heroImageFile___NODE", by: "id")
+      publishDate: Date @dateformat
+      blockIndexing: Boolean
+      tags: [GallynTag] @link(from: "tags___NODE", by: "id")
+      rawBody: String
+      hreflang: [GallynHreflang]
+      availableLocales: [String]
+    }
+
+    type GallynTag implements Node {
+      gallynId: String!
+      name: String!
+      slug: String!
+    }
+  `);
+};
+
 exports.sourceNodes = async (
   { actions, createNodeId, createContentDigest, store, cache, reporter },
   pluginOptions
@@ -28,39 +152,48 @@ exports.sourceNodes = async (
     return;
   }
 
-  // wd_ delivery keys embed tenant + site context — only X-API-Key needed
-  const headers = {
-    "X-API-Key": apiKey,
-  };
-
+  const headers = { "X-API-Key": apiKey };
   const base = apiUrl.replace(/\/$/, "");
+  const nodeHelpers = { createNode, createNodeId, createContentDigest };
+  const imageHelpers = { store, cache, createNode, createNodeId, reporter };
 
   // 1. Fetch available languages
-  let locales;
+  let langResponse;
   try {
-    locales = await fetchJSON(`${base}/delivery/web/languages`, headers);
+    langResponse = await fetchJSON(`${base}/delivery/web/languages`, headers);
   } catch (err) {
-    reporter.panic(`${PLUGIN_NAME}: Failed to fetch languages — ${err.message}`);
+    reporter.panic(
+      `${PLUGIN_NAME}: Failed to fetch languages — ${err.message}`
+    );
     return;
   }
 
+  const locales = langResponse.languages.map((l) => l.code);
   reporter.info(`${PLUGIN_NAME}: Found locales: ${locales.join(", ")}`);
 
   // 2. Fetch tags for default locale
   let tags = [];
   try {
-    tags = await fetchJSON(
+    const tagResponse = await fetchJSON(
       `${base}/delivery/web/tags?locale=${defaultLocale}`,
       headers
     );
+    tags = tagResponse.items || [];
   } catch (err) {
     reporter.warn(`${PLUGIN_NAME}: Failed to fetch tags — ${err.message}`);
   }
 
+  // Map from Gallyn tag ID → Gatsby node ID (for blog post linking)
+  const tagNodeIdMap = new Map();
+
   for (const tag of tags) {
+    const nodeId = createNodeId(`GallynTag-${tag.id}`);
+    tagNodeIdMap.set(tag.id, nodeId);
     createNode({
-      ...tag,
-      id: createNodeId(`GallynTag-${tag.id}`),
+      gallynId: tag.id,
+      name: tag.name,
+      slug: tag.slug,
+      id: nodeId,
       internal: {
         type: "GallynTag",
         contentDigest: createContentDigest(tag),
@@ -75,24 +208,29 @@ exports.sourceNodes = async (
   const allBlogPosts = [];
 
   for (const locale of locales) {
-    const [pages, blogPosts] = await Promise.all([
-      fetchJSON(`${base}/delivery/web/pages?locale=${locale}`, headers).catch(
-        (err) => {
-          reporter.warn(
-            `${PLUGIN_NAME}: Failed to fetch pages for ${locale} — ${err.message}`
-          );
-          return [];
-        }
-      ),
-      fetchJSON(`${base}/delivery/web/blog?locale=${locale}`, headers).catch(
-        (err) => {
-          reporter.warn(
-            `${PLUGIN_NAME}: Failed to fetch blog posts for ${locale} — ${err.message}`
-          );
-          return [];
-        }
-      ),
+    const [pageResponse, blogResponse] = await Promise.all([
+      fetchJSON(
+        `${base}/delivery/web/pages?locale=${locale}`,
+        headers
+      ).catch((err) => {
+        reporter.warn(
+          `${PLUGIN_NAME}: Failed to fetch pages for ${locale} — ${err.message}`
+        );
+        return { items: [] };
+      }),
+      fetchJSON(
+        `${base}/delivery/web/blog?locale=${locale}`,
+        headers
+      ).catch((err) => {
+        reporter.warn(
+          `${PLUGIN_NAME}: Failed to fetch blog posts for ${locale} — ${err.message}`
+        );
+        return { items: [] };
+      }),
     ]);
+
+    const pages = pageResponse.items || [];
+    const blogPosts = blogResponse.items || [];
 
     allPages.push(...pages.map((p) => ({ ...p, locale })));
     allBlogPosts.push(...blogPosts.map((p) => ({ ...p, locale })));
@@ -107,38 +245,90 @@ exports.sourceNodes = async (
     const hreflangKey = page.id.replace(/-[a-z]{2}$/, "");
     const hreflang = pageHreflangMap.get(hreflangKey) || [];
     const availableLocales = hreflang.map((h) => h.locale);
+    const pageNodeId = createNodeId(`GallynPage-${page.id}`);
 
-    let heroImageFile = null;
-    if (page.heroImage) {
-      try {
-        heroImageFile = await createRemoteFileNode({
-          url: page.heroImage,
-          store,
-          cache,
-          createNode,
-          createNodeId,
-          reporter,
-        });
-      } catch (err) {
-        reporter.warn(
-          `${PLUGIN_NAME}: Failed to download hero image for page ${page.slug} — ${err.message}`
+    // Download hero image
+    const heroFile = await downloadImage(page.hero_image_url, imageHelpers);
+
+    // Create related page nodes (with their own hero images)
+    const relatedPageNodeIds = [];
+    for (const rp of page.related_pages || []) {
+      const rpNodeId = createNodeId(
+        `GallynRelatedPage-${page.id}-${rp.id}`
+      );
+      const rpHeroFile = await downloadImage(rp.hero_image_url, imageHelpers);
+      createNode({
+        gallynId: rp.id,
+        title: rp.title,
+        slug: rp.slug,
+        blurb: rp.blurb || null,
+        pageType: rp.page_type,
+        heroImageFile___NODE: rpHeroFile ? rpHeroFile.id : null,
+        id: rpNodeId,
+        internal: {
+          type: "GallynRelatedPage",
+          contentDigest: createContentDigest(rp),
+        },
+      });
+      relatedPageNodeIds.push(rpNodeId);
+    }
+
+    // Create markdown child nodes for each section field
+    const sectionLinks = {};
+    for (const [key, value] of Object.entries(page.sections || {})) {
+      if (typeof value === "string" && value.trim()) {
+        const mdNodeId = createMarkdownNode(
+          pageNodeId,
+          key,
+          value,
+          nodeHelpers
         );
+        if (mdNodeId) {
+          sectionLinks[`${key}___NODE`] = mdNodeId;
+        }
       }
     }
 
-    const nodeData = {
-      ...page,
+    createNode({
+      gallynId: page.id,
+      title: page.title,
+      slug: page.slug,
+      pageType: page.page_type,
+      locale: page.locale,
+      blurb: page.blurb || null,
+      heroImageFile___NODE: heroFile ? heroFile.id : null,
+      videoUrl: page.video_url || null,
+      blockIndexing: page.block_indexing || false,
+      publishedAt: page.published_at || null,
+      // Flattened meta fields
+      checkboxes: page.checkboxes || [],
+      cta: page.cta || null,
+      testimonials: page.testimonials || [],
+      pageCategory: page.page_category || null,
+      templateType: page.template_type || null,
+      showAttachments: page.show_attachments || false,
+      autoplayVideo: page.autoplay_video || false,
+      // Sections as raw JSON (for direct access)
+      sections: page.sections || {},
+      // Resolved references
+      relatedPages___NODE: relatedPageNodeIds,
+      attachments: (page.attachments || []).map((a) => ({
+        id: a.id,
+        filename: a.filename,
+        url: a.url,
+        altText: a.alt_text || null,
+      })),
       hreflang,
       availableLocales,
-      heroImageFile___NODE: heroImageFile ? heroImageFile.id : null,
-      id: createNodeId(`GallynPage-${page.id}`),
+      // Section markdown child nodes (intro___NODE, why___NODE, etc.)
+      ...sectionLinks,
+      // Gatsby internals
+      id: pageNodeId,
       internal: {
         type: "GallynPage",
         contentDigest: createContentDigest(page),
       },
-    };
-
-    createNode(nodeData);
+    });
   }
 
   reporter.info(`${PLUGIN_NAME}: Created ${allPages.length} GallynPage nodes`);
@@ -148,38 +338,45 @@ exports.sourceNodes = async (
     const hreflangKey = post.id.replace(/-[a-z]{2}$/, "");
     const hreflang = blogHreflangMap.get(hreflangKey) || [];
     const availableLocales = hreflang.map((h) => h.locale);
+    const postNodeId = createNodeId(`GallynBlogPost-${post.id}`);
 
-    let heroImageFile = null;
-    if (post.heroImage) {
-      try {
-        heroImageFile = await createRemoteFileNode({
-          url: post.heroImage,
-          store,
-          cache,
-          createNode,
-          createNodeId,
-          reporter,
-        });
-      } catch (err) {
-        reporter.warn(
-          `${PLUGIN_NAME}: Failed to download hero image for blog post ${post.slug} — ${err.message}`
-        );
-      }
-    }
+    // Download hero image
+    const heroFile = await downloadImage(post.hero_image_url, imageHelpers);
 
-    const nodeData = {
-      ...post,
+    // Create markdown child node for body
+    const bodyNodeId = createMarkdownNode(
+      postNodeId,
+      "body",
+      post.body,
+      nodeHelpers
+    );
+
+    // Map tag IDs to Gatsby node IDs
+    const tagNodeIds = (post.tags || [])
+      .map((t) => tagNodeIdMap.get(t.id))
+      .filter(Boolean);
+
+    createNode({
+      gallynId: post.id,
+      title: post.title,
+      slug: post.slug,
+      locale: post.locale,
+      author: post.author || null,
+      description: post.description || null,
+      heroImageFile___NODE: heroFile ? heroFile.id : null,
+      publishDate: post.publish_date || null,
+      blockIndexing: post.block_indexing || false,
+      tags___NODE: tagNodeIds,
+      body___NODE: bodyNodeId,
+      rawBody: post.body || "",
       hreflang,
       availableLocales,
-      heroImageFile___NODE: heroImageFile ? heroImageFile.id : null,
-      id: createNodeId(`GallynBlogPost-${post.id}`),
+      id: postNodeId,
       internal: {
         type: "GallynBlogPost",
         contentDigest: createContentDigest(post),
       },
-    };
-
-    createNode(nodeData);
+    });
   }
 
   reporter.info(
@@ -187,113 +384,13 @@ exports.sourceNodes = async (
   );
 };
 
-exports.createPages = async ({ graphql, actions, reporter }) => {
-  const { createPage } = actions;
-
-  // Query all pages
-  const pagesResult = await graphql(`
-    query {
-      allGallynPage {
-        nodes {
-          slug
-          locale
-          pageType
-          id
-        }
-      }
-    }
-  `);
-
-  if (pagesResult.errors) {
-    reporter.panic(
-      `${PLUGIN_NAME}: Error querying GallynPage nodes`,
-      pagesResult.errors
-    );
-    return;
-  }
-
-  const templates = {
-    landing: "./src/templates/landing-page.js",
-    static: "./src/templates/static-page.js",
-    case_study: "./src/templates/case-study.js",
-  };
-
-  for (const node of pagesResult.data.allGallynPage.nodes) {
-    const isDefault = node.locale === "en";
-    const pagePath = isDefault
-      ? `/${node.slug}`
-      : `/${node.locale}/${node.slug}`;
-
-    createPage({
-      path: pagePath,
-      component: require.resolve(
-        templates[node.pageType] || templates.static
-      ),
-      context: {
-        id: node.id,
-        slug: node.slug,
-        locale: node.locale,
-      },
-    });
-  }
-
-  reporter.info(
-    `${PLUGIN_NAME}: Created ${pagesResult.data.allGallynPage.nodes.length} pages`
-  );
-
-  // Query all blog posts
-  const blogResult = await graphql(`
-    query {
-      allGallynBlogPost {
-        nodes {
-          slug
-          locale
-          id
-        }
-      }
-    }
-  `);
-
-  if (blogResult.errors) {
-    reporter.panic(
-      `${PLUGIN_NAME}: Error querying GallynBlogPost nodes`,
-      blogResult.errors
-    );
-    return;
-  }
-
-  for (const node of blogResult.data.allGallynBlogPost.nodes) {
-    const isDefault = node.locale === "en";
-    const postPath = isDefault
-      ? `/${node.slug}`
-      : `/${node.locale}/${node.slug}`;
-
-    createPage({
-      path: postPath,
-      component: require.resolve("./src/templates/blog-post.js"),
-      context: {
-        id: node.id,
-        slug: node.slug,
-        locale: node.locale,
-      },
-    });
-  }
-
-  reporter.info(
-    `${PLUGIN_NAME}: Created ${blogResult.data.allGallynBlogPost.nodes.length} blog post pages`
-  );
-};
-
 /**
  * Build a map from base content ID to array of {locale, slug} for hreflang tags.
- * Assumes each content item has an `id` that ends with `-{locale}` suffix,
- * and the base ID (without the locale suffix) groups translations together.
  */
 function buildHreflangMap(items, defaultLocale) {
   const map = new Map();
 
   for (const item of items) {
-    // Strip locale suffix to get the base content ID
     const baseId = item.id.replace(/-[a-z]{2}$/, "");
     if (!map.has(baseId)) {
       map.set(baseId, []);
@@ -306,7 +403,7 @@ function buildHreflangMap(items, defaultLocale) {
 
     map.get(baseId).push({
       locale: item.locale,
-      slug: slug,
+      slug,
     });
   }
 
