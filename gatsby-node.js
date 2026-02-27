@@ -92,6 +92,10 @@ exports.createSchemaCustomization = ({ actions }) => {
       altText: String
     }
 
+    type GallynMarkdownField implements Node {
+      id: ID!
+    }
+
     type GallynPage implements Node {
       gallynId: String!
       title: String!
@@ -109,8 +113,13 @@ exports.createSchemaCustomization = ({ actions }) => {
       pageCategory: String
       templateType: String
       showAttachments: Boolean
+      showInFooter: Boolean
       autoplayVideo: Boolean
       sections: JSON
+      intro: GallynMarkdownField @link(from: "intro___NODE", by: "id")
+      why: GallynMarkdownField @link(from: "why___NODE", by: "id")
+      solution: GallynMarkdownField @link(from: "solution___NODE", by: "id")
+      fomo: GallynMarkdownField @link(from: "fomo___NODE", by: "id")
       relatedPages: [GallynRelatedPage] @link(from: "relatedPages___NODE", by: "id")
       attachments: [GallynAttachment]
       hreflang: [GallynHreflang]
@@ -137,6 +146,7 @@ exports.createSchemaCustomization = ({ actions }) => {
       publishDate: Date @dateformat
       blockIndexing: Boolean
       tags: [GallynTag] @link(from: "tags___NODE", by: "id")
+      body: GallynMarkdownField @link(from: "body___NODE", by: "id")
       rawBody: String
       hreflang: [GallynHreflang]
       availableLocales: [String]
