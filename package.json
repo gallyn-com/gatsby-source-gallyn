@@ -1,0 +1,12 @@
+{
+  "name": "gatsby-source-gallyn",
+  "version": "1.0.0",
+  "description": "Gatsby source plugin for Gallyn CMS",
+  "main": "gatsby-node.js",
+  "dependencies": {
+    "node-fetch": "^2.7.0"
+  },
+  "peerDependencies": {
+    "gatsby": "^5.0.0"
+  }
+}
