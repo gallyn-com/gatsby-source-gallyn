@@ -92,7 +92,7 @@ exports.createSchemaCustomization = ({ actions }) => {
       altText: String
     }
 
-    type GallynMarkdownField implements Node {
+    type GallynMarkdownField implements Node @infer {
       id: ID!
     }
 
@@ -116,6 +116,7 @@ exports.createSchemaCustomization = ({ actions }) => {
       showInFooter: Boolean
       autoplayVideo: Boolean
       sections: JSON
+      body: GallynMarkdownField @link(from: "body___NODE", by: "id")
       intro: GallynMarkdownField @link(from: "intro___NODE", by: "id")
       why: GallynMarkdownField @link(from: "why___NODE", by: "id")
       solution: GallynMarkdownField @link(from: "solution___NODE", by: "id")
