@@ -11,9 +11,6 @@
   "publishConfig": {
     "access": "public"
   },
-  "dependencies": {
-    "node-fetch": "^2.7.0"
-  },
   "peerDependencies": {
     "gatsby": "^5.0.0"
   }

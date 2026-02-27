@@ -1,4 +1,3 @@
-const fetch = require("node-fetch");
 const { createRemoteFileNode } = require("gatsby-source-filesystem");
 
 const PLUGIN_NAME = "gatsby-source-gallyn";
