@@ -330,6 +330,7 @@ exports.sourceNodes = async (
       pageCategory: page.page_category || null,
       templateType: page.template_type || null,
       showAttachments: page.show_attachments || false,
+      showInFooter: page.show_in_footer || false,
       autoplayVideo: page.autoplay_video || false,
       // Sections as raw JSON (for direct access)
       sections: page.sections || {},
