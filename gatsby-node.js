@@ -25,30 +25,68 @@ async function fetchJSON(url, headers) {
   return resp.json();
 }
 
-/**
- * Download an image via createRemoteFileNode, returning the File node or null.
- */
-async function downloadImage(
-  url,
-  { store, cache, createNode, createNodeId, reporter }
-) {
-  if (!url) return null;
-  const createRemoteFileNode = getCreateRemoteFileNode(store);
-  try {
-    return await createRemoteFileNode({
-      url,
-      store,
-      cache,
-      createNode,
-      createNodeId,
-      reporter,
-    });
-  } catch (err) {
-    reporter.warn(
-      `${PLUGIN_NAME}: Failed to download image ${url} — ${err.message}`
-    );
-    return null;
+async function mapWithConcurrency(items, concurrency, fn) {
+  const results = new Array(items.length);
+  let nextIndex = 0;
+  async function worker() {
+    while (nextIndex < items.length) {
+      const i = nextIndex++;
+      results[i] = await fn(items[i], i);
+    }
   }
+  await Promise.all(
+    Array.from({ length: Math.min(concurrency, items.length) }, () => worker())
+  );
+  return results;
+}
+
+const IMAGE_CACHE_KEY = `${PLUGIN_NAME}--image-cache`;
+
+async function downloadAllImages(
+  urls,
+  { store, cache, createNode, createNodeId, getNode, reporter }
+) {
+  const createRemoteFileNode = getCreateRemoteFileNode(store);
+  const cached = (await cache.get(IMAGE_CACHE_KEY)) || {};
+  const imageMap = new Map();
+
+  // Check cache — keep hits whose File node still exists
+  const toDownload = [];
+  for (const url of urls) {
+    const cachedId = cached[url];
+    if (cachedId && getNode(cachedId)) {
+      imageMap.set(url, getNode(cachedId));
+    } else {
+      toDownload.push(url);
+    }
+  }
+
+  reporter.info(
+    `${PLUGIN_NAME}: Images — ${imageMap.size} cached, ${toDownload.length} to download`
+  );
+
+  // Download misses in parallel
+  await mapWithConcurrency(toDownload, 20, async (url) => {
+    try {
+      const fileNode = await createRemoteFileNode({
+        url,
+        store,
+        cache,
+        createNode,
+        createNodeId,
+        reporter,
+      });
+      imageMap.set(url, fileNode);
+      cached[url] = fileNode.id;
+    } catch (err) {
+      reporter.warn(
+        `${PLUGIN_NAME}: Failed to download image ${url} — ${err.message}`
+      );
+    }
+  });
+
+  await cache.set(IMAGE_CACHE_KEY, cached);
+  return imageMap;
 }
 
 /**
@@ -163,7 +201,7 @@ exports.createSchemaCustomization = ({ actions }) => {
 };
 
 exports.sourceNodes = async (
-  { actions, createNodeId, createContentDigest, store, cache, reporter },
+  { actions, createNodeId, createContentDigest, store, cache, getNode, reporter },
   pluginOptions
 ) => {
   const { createNode } = actions;
@@ -180,7 +218,7 @@ exports.sourceNodes = async (
   const headers = { "X-API-Key": apiKey };
   const base = apiUrl.replace(/\/$/, "");
   const nodeHelpers = { createNode, createNodeId, createContentDigest };
-  const imageHelpers = { store, cache, createNode, createNodeId, reporter };
+  const imageHelpers = { store, cache, createNode, createNodeId, getNode, reporter };
 
   // 1. Fetch available languages
   let langResponse;
@@ -265,15 +303,28 @@ exports.sourceNodes = async (
   const pageHreflangMap = buildHreflangMap(allPages, defaultLocale);
   const blogHreflangMap = buildHreflangMap(allBlogPosts, defaultLocale);
 
-  // 5. Create GallynPage nodes
+  // 5. Download all images (deduplicated + cached + parallel)
+  const allImageUrls = new Set();
+  for (const page of allPages) {
+    if (page.hero_image_url) allImageUrls.add(page.hero_image_url);
+    for (const rp of page.related_pages || []) {
+      if (rp.hero_image_url) allImageUrls.add(rp.hero_image_url);
+    }
+  }
+  for (const post of allBlogPosts) {
+    if (post.hero_image_url) allImageUrls.add(post.hero_image_url);
+  }
+  const imageMap = await downloadAllImages([...allImageUrls], imageHelpers);
+
+  // 6. Create GallynPage nodes
   for (const page of allPages) {
     const hreflangKey = page.id.replace(/-[a-z]{2}$/, "");
     const hreflang = pageHreflangMap.get(hreflangKey) || [];
     const availableLocales = hreflang.map((h) => h.locale);
     const pageNodeId = createNodeId(`GallynPage-${page.id}`);
 
-    // Download hero image
-    const heroFile = await downloadImage(page.hero_image_url, imageHelpers);
+    // Look up hero image from pre-downloaded map
+    const heroFile = imageMap.get(page.hero_image_url) || null;
 
     // Create related page nodes (with their own hero images)
     const relatedPageNodeIds = [];
@@ -281,7 +332,7 @@ exports.sourceNodes = async (
       const rpNodeId = createNodeId(
         `GallynRelatedPage-${page.id}-${rp.id}`
       );
-      const rpHeroFile = await downloadImage(rp.hero_image_url, imageHelpers);
+      const rpHeroFile = imageMap.get(rp.hero_image_url) || null;
       createNode({
         gallynId: rp.id,
         title: rp.title,
@@ -359,15 +410,15 @@ exports.sourceNodes = async (
 
   reporter.info(`${PLUGIN_NAME}: Created ${allPages.length} GallynPage nodes`);
 
-  // 6. Create GallynBlogPost nodes
+  // 7. Create GallynBlogPost nodes
   for (const post of allBlogPosts) {
     const hreflangKey = post.id.replace(/-[a-z]{2}$/, "");
     const hreflang = blogHreflangMap.get(hreflangKey) || [];
     const availableLocales = hreflang.map((h) => h.locale);
     const postNodeId = createNodeId(`GallynBlogPost-${post.id}`);
 
-    // Download hero image
-    const heroFile = await downloadImage(post.hero_image_url, imageHelpers);
+    // Look up hero image from pre-downloaded map
+    const heroFile = imageMap.get(post.hero_image_url) || null;
 
     // Create markdown child node for body
     const bodyNodeId = createMarkdownNode(
