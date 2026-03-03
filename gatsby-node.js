@@ -136,12 +136,18 @@ exports.createSchemaCustomization = ({ actions }) => {
       altText: String
     }
 
-    type GallynMarkdownField implements Node {
+    type GallynMarkdownField implements Node @dontInfer {
       id: ID!
       childMarkdownRemark: MarkdownRemark @link
     }
 
-    type GallynPage implements Node {
+    type GallynOutlet implements Node @dontInfer {
+      gallynId: String!
+      name: String!
+      logoFile: File @link(from: "logoFile___NODE", by: "id")
+    }
+
+    type GallynPage implements Node @dontInfer {
       gallynId: String!
       title: String!
       slug: String!
@@ -166,13 +172,14 @@ exports.createSchemaCustomization = ({ actions }) => {
       why: GallynMarkdownField @link(from: "why___NODE", by: "id")
       solution: GallynMarkdownField @link(from: "solution___NODE", by: "id")
       fomo: GallynMarkdownField @link(from: "fomo___NODE", by: "id")
+      outlet: GallynOutlet @link(from: "outlet___NODE", by: "id")
       relatedPages: [GallynRelatedPage] @link(from: "relatedPages___NODE", by: "id")
       attachments: [GallynAttachment]
       hreflang: [GallynHreflang]
       availableLocales: [String]
     }
 
-    type GallynRelatedPage implements Node {
+    type GallynRelatedPage implements Node @dontInfer {
       gallynId: String!
       title: String!
       slug: String!
@@ -181,7 +188,7 @@ exports.createSchemaCustomization = ({ actions }) => {
       heroImageFile: File @link(from: "heroImageFile___NODE", by: "id")
     }
 
-    type GallynBlogPost implements Node {
+    type GallynBlogPost implements Node @dontInfer {
       gallynId: String!
       title: String!
       slug: String!
@@ -198,12 +205,12 @@ exports.createSchemaCustomization = ({ actions }) => {
       availableLocales: [String]
     }
 
-    type GallynLanguage implements Node {
+    type GallynLanguage implements Node @dontInfer {
       code: String!
       isDefault: Boolean!
     }
 
-    type GallynTag implements Node {
+    type GallynTag implements Node @dontInfer {
       gallynId: String!
       name: String!
       slug: String!
@@ -341,18 +348,41 @@ exports.sourceNodes = async (
     for (const rp of page.related_pages || []) {
       if (rp.hero_image_url) allImageUrls.add(rp.hero_image_url);
     }
+    if (page.outlet?.logo_url) allImageUrls.add(page.outlet.logo_url);
   }
   for (const post of allBlogPosts) {
     if (post.hero_image_url) allImageUrls.add(post.hero_image_url);
   }
   const imageMap = await downloadAllImages([...allImageUrls], imageHelpers);
 
-  // 7. Create GallynPage nodes
+  // 7. Create deduplicated GallynOutlet nodes
+  const outletNodeIdMap = new Map();
   for (const page of allPages) {
-    const hreflangKey = page.id.replace(/-[a-z]{2}$/, "");
+    const outlet = page.outlet;
+    if (!outlet || outletNodeIdMap.has(outlet.id)) continue;
+    const outletNodeId = createNodeId(`GallynOutlet-${outlet.id}`);
+    const logoFile = imageMap.get(outlet.logo_url) || null;
+    createNode({
+      gallynId: outlet.id,
+      name: outlet.name,
+      logoFile___NODE: logoFile ? logoFile.id : null,
+      id: outletNodeId,
+      internal: {
+        type: "GallynOutlet",
+        contentDigest: createContentDigest(outlet),
+      },
+    });
+    outletNodeIdMap.set(outlet.id, outletNodeId);
+  }
+
+  reporter.info(`${PLUGIN_NAME}: Created ${outletNodeIdMap.size} GallynOutlet nodes`);
+
+  // 8. Create GallynPage nodes
+  for (const page of allPages) {
+    const hreflangKey = page.id;
     const hreflang = pageHreflangMap.get(hreflangKey) || [];
     const availableLocales = hreflang.map((h) => h.locale);
-    const pageNodeId = createNodeId(`GallynPage-${page.id}`);
+    const pageNodeId = createNodeId(`GallynPage-${page.id}-${page.locale}`);
 
     // Look up hero image from pre-downloaded map
     const heroFile = imageMap.get(page.hero_image_url) || null;
@@ -361,7 +391,7 @@ exports.sourceNodes = async (
     const relatedPageNodeIds = [];
     for (const rp of page.related_pages || []) {
       const rpNodeId = createNodeId(
-        `GallynRelatedPage-${page.id}-${rp.id}`
+        `GallynRelatedPage-${page.id}-${rp.id}-${page.locale}`
       );
       const rpHeroFile = imageMap.get(rp.hero_image_url) || null;
       createNode({
@@ -419,6 +449,7 @@ exports.sourceNodes = async (
       // Sections as raw JSON (for direct access)
       sections: page.sections || {},
       // Resolved references
+      outlet___NODE: page.outlet ? outletNodeIdMap.get(page.outlet.id) || null : null,
       relatedPages___NODE: relatedPageNodeIds,
       attachments: (page.attachments || []).map((a) => ({
         id: a.id,
@@ -441,12 +472,12 @@ exports.sourceNodes = async (
 
   reporter.info(`${PLUGIN_NAME}: Created ${allPages.length} GallynPage nodes`);
 
-  // 8. Create GallynBlogPost nodes
+  // 9. Create GallynBlogPost nodes
   for (const post of allBlogPosts) {
-    const hreflangKey = post.id.replace(/-[a-z]{2}$/, "");
+    const hreflangKey = post.id;
     const hreflang = blogHreflangMap.get(hreflangKey) || [];
     const availableLocales = hreflang.map((h) => h.locale);
-    const postNodeId = createNodeId(`GallynBlogPost-${post.id}`);
+    const postNodeId = createNodeId(`GallynBlogPost-${post.id}-${post.locale}`);
 
     // Look up hero image from pre-downloaded map
     const heroFile = imageMap.get(post.hero_image_url) || null;
@@ -499,7 +530,7 @@ function buildHreflangMap(items, defaultLocale) {
   const map = new Map();
 
   for (const item of items) {
-    const baseId = item.id.replace(/-[a-z]{2}$/, "");
+    const baseId = item.id;
     if (!map.has(baseId)) {
       map.set(baseId, []);
     }
